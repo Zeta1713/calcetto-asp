@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="it"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Calcetto ASP">
+<meta name="theme-color" content="#1f7a45">
+<link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icon-180.png"><link rel="icon" href="icon-192.png">
+<title>Calcetto ASP · Prenota</title>
+<link rel="stylesheet" href="stile.css">
+</head><body>
+<header class="top"><div class="wrap">
+  <h1>Arena Secondiano Cosimi</h1>
+  <div class="sub">Campo di calcio a 5 · Via Martiri delle Fosse Ardeatine, Civitavecchia</div>
+  <nav class="tabs" id="tabs"><button data-t="prenota" class="on">Prenota</button><button data-t="mie">Le mie prenotazioni <span class="badge" id="bMie" hidden></span></button></nav>
+</div></header>
+<div class="banner" role="note"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2 1 21h22L12 2Zm0 6 .9 7h-1.8L12 8Zm0 9.2a1.2 1.2 0 1 1 0 2.4 1.2 1.2 0 0 1 0-2.4Z"/></svg>
+  Sono rigorosamente vietate le scarpe da calcio</div>
+<div class="demo" id="demo" hidden>Modalità prova: le prenotazioni restano su questo dispositivo finché l'app non è collegata all'archivio online.</div>
+
+<main>
+  <div class="err" id="err" hidden></div>
+
+  <section data-p="prenota">
+    <div class="card">
+      <div class="mesebar"><button class="btn" id="mPrev" aria-label="Mese precedente">‹</button><b id="mTit"></b><button class="btn" id="mNext" aria-label="Mese successivo">›</button></div>
+      <div class="cal" id="cal"></div>
+      <div class="legenda"><span><i style="background:var(--ok)"></i>disponibile</span><span><i style="background:var(--warn)"></i>poche fasce</span><span><i style="background:var(--bad)"></i>tutto occupato</span></div>
+    </div>
+    <div class="card" id="dayCard" hidden>
+      <h2 id="dTit"></h2>
+      <div class="nota" id="dSab" hidden>Il sabato la prenotazione va confermata dal gestore, perché possono esserci partite di campionato. Riceverai l'esito in «Le mie prenotazioni».</div>
+      <div class="fasce" id="fasce"></div>
+      <p class="hint">Si prenota fino a 6 ore prima e si disdice fino a 6 ore prima. Ogni prenotazione dura 1 ora.</p>
+    </div>
+  </section>
+
+  <section data-p="mie" hidden>
+    <div id="mie"></div>
+    <p class="hint">Le prenotazioni sono legate a questo telefono: per disdirle usa sempre questa app.</p>
+  </section>
+</main>
+
+<dialog id="dlg"><form id="frm" method="dialog">
+  <h3>Prenota il campo</h3>
+  <p class="hint" style="margin:0 0 14px" id="dlgQ"></p>
+  <label class="f"><span>Nome e cognome</span><input id="fNome" autocomplete="name" required minlength="2" maxlength="50"></label>
+  <label class="f"><span>Cellulare</span><input id="fCell" type="tel" inputmode="tel" autocomplete="tel" required pattern="[+0-9 ]{6,18}" maxlength="18" placeholder="es. 333 1234567"></label>
+  <div class="nota" id="dlgSab" hidden>Di sabato la richiesta resta in attesa finché il gestore non la conferma.</div>
+  <p class="hint" style="margin:0 0 12px">Ricorda: sono vietate le scarpe da calcio.</p>
+  <div class="riga"><button class="btn" type="button" id="dlgNo">Annulla</button><button class="btn pri" id="dlgOk">Prenota</button></div>
+</form></dialog>
+<div class="toast" id="toast" hidden></div>
+
+<script type="module">
+import { IMPIANTO, REGOLE, creaBackend, slotId, inizioSlot, fascia, riservata, conConferma, disdicibile, statoTempo, GIORNI, fmtGiorno, fmtMese, STATI, esc, pulisciCell, chiaveGiorno } from "./comune.js";
+const $ = id => document.getElementById(id);
+const toast = m => { const t = $("toast"); t.textContent = m; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 3200); };
+const errore = e => { console.error(e); const el = $("err"); el.textContent = "Collegamento all'archivio non riuscito. Controlla la connessione e riapri l'app."; el.hidden = false; };
+const oggi0 = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
+
+let api, occ = new Map(), mie = [], mese = (() => { const d = oggi0(); d.setDate(1); return d; })(), sel = null, stopOcc = null, stopMie = null, scelta = null;
+
+/* ---------- calendario ---------- */
+function liberi(d) {
+  let n = 0, tot = 0;
+  for (const h of REGOLE.ore) { if (riservata(d, h)) continue; tot++; if (statoTempo(inizioSlot(d, h)) === "ok" && !occ.has(slotId(d, h))) n++; }
+  return { n, tot };
+}
+function renderCal() {
+  $("mTit").textContent = fmtMese(mese);
+  const primo = new Date(mese), off = (primo.getDay() + 6) % 7, nGiorni = new Date(mese.getFullYear(), mese.getMonth() + 1, 0).getDate();
+  const o = oggi0(), lim = Date.now() + REGOLE.giorniMax * 864e5;
+  $("mPrev").disabled = mese <= new Date(o.getFullYear(), o.getMonth(), 1);
+  $("mNext").disabled = new Date(mese.getFullYear(), mese.getMonth() + 1, 1).getTime() > lim;
+  let h = GIORNI.map(g => `<div class="gs">${g}</div>`).join("") + "<div></div>".repeat(off);
+  for (let g = 1; g <= nGiorni; g++) {
+    const d = new Date(mese.getFullYear(), mese.getMonth(), g), { n, tot } = liberi(d);
+    const passato = d < o, lontano = d.getTime() > lim, chiuso = passato || lontano || (n === 0 && inizioSlot(d, 22) - Date.now() < REGOLE.anticipoOre * 3600e3);
+    const cls = ["gg", chiuso ? "off" : n === 0 ? "pieno" : n <= 2 ? "pochi" : "", +d === +o ? "oggi" : "", sel && +d === +sel ? "sel" : ""].join(" ");
+    h += `<button class="${cls}" data-g="${g}" ${chiuso ? "disabled" : ""} aria-label="${fmtGiorno(d.getTime())}${chiuso ? "" : `, ${n} fasce libere`}">${g}${chiuso ? "" : `<i></i><small>${n} liberi</small>`}</button>`;
+  }
+  $("cal").innerHTML = h;
+}
+$("cal").addEventListener("click", e => { const b = e.target.closest("[data-g]"); if (!b || b.disabled) return;
+  sel = new Date(mese.getFullYear(), mese.getMonth(), +b.dataset.g); renderCal(); renderFasce(); $("dayCard").scrollIntoView({ behavior: "smooth", block: "start" }); });
+$("mPrev").addEventListener("click", () => { mese = new Date(mese.getFullYear(), mese.getMonth() - 1, 1); sel = null; caricaMese(); });
+$("mNext").addEventListener("click", () => { mese = new Date(mese.getFullYear(), mese.getMonth() + 1, 1); sel = null; caricaMese(); });
+
+/* ---------- fasce del giorno ---------- */
+function renderFasce() {
+  $("dayCard").hidden = !sel; if (!sel) return;
+  $("dTit").textContent = fmtGiorno(sel.getTime()); $("dSab").hidden = !conConferma(sel);
+  const mieAttive = new Set(mie.filter(p => p.stato === "confermata" || p.stato === "in_attesa").map(p => p.slot));
+  $("fasce").innerHTML = REGOLE.ore.map(h => {
+    const id = slotId(sel, h), t = statoTempo(inizioSlot(sel, h)), o = occ.get(id);
+    let cls = "nonp", s = "", az = "";
+    if (mieAttive.has(id)) { const p = mie.find(x => x.slot === id); cls = "mia"; s = `<b>La tua prenotazione</b> · ${STATI[p.stato].testo}`; }
+    else if (riservata(sel, h)) s = "Non prenotabile";
+    else if (o) s = o.stato === "bloccato" ? "Non disponibile" : o.stato === "in_attesa" ? "Occupata (in attesa di conferma)" : "Occupata";
+    else if (t === "troppo_presto") s = "Non più prenotabile (serve un anticipo di 6 ore)";
+    else if (t === "troppo_lontano") s = "Prenotabile più avanti";
+    else { cls = "libera"; s = "<b>Libera</b>"; az = `<button class="btn pri" data-h="${h}">Prenota</button>`; }
+    return `<div class="fx ${cls}"><span class="h">${fascia(h)}</span><span class="s">${s}</span>${az}</div>`;
+  }).join("");
+}
+$("fasce").addEventListener("click", e => { const b = e.target.closest("[data-h]"); if (b) apri(+b.dataset.h); });
+
+/* ---------- prenotazione ---------- */
+function apri(h) {
+  scelta = { d: new Date(sel), h };
+  $("dlgQ").textContent = `${fmtGiorno(sel.getTime())}, ${fascia(h)}`;
+  $("dlgSab").hidden = !conConferma(sel);
+  try { const p = JSON.parse(localStorage.getItem("asp.profilo") || "{}"); $("fNome").value = p.nome || ""; $("fCell").value = p.cell || ""; } catch {}
+  $("dlgOk").disabled = false; $("dlg").showModal();
+}
+$("dlgNo").addEventListener("click", () => $("dlg").close());
+$("frm").addEventListener("submit", async e => {
+  e.preventDefault(); if (!scelta) return;
+  const nome = $("fNome").value.trim().replace(/\s+/g, " "), cell = pulisciCell($("fCell").value);
+  if (nome.length < 2) { $("fNome").focus(); return; }
+  if (cell.replace("+", "").length < 6) { $("fCell").setCustomValidity("Inserisci un numero valido"); $("fCell").reportValidity(); $("fCell").setCustomValidity(""); return; }
+  const { d, h } = scelta, inizio = inizioSlot(d, h);
+  if (statoTempo(inizio) !== "ok") { $("dlg").close(); toast("Questa fascia non è più prenotabile."); renderFasce(); return; }
+  try { localStorage.setItem("asp.profilo", JSON.stringify({ nome, cell })); } catch {}
+  const stato = conConferma(d) ? "in_attesa" : "confermata";
+  $("dlgOk").disabled = true;
+  try {
+    await api.prenota({ slot: slotId(d, h), inizio, nome, cell, stato });
+    $("dlg").close();
+    toast(stato === "confermata" ? "Prenotazione confermata!" : "Richiesta inviata: attendi la conferma del gestore");
+  } catch (err) {
+    $("dlgOk").disabled = false;
+    if (String(err && err.message).includes("occupata")) { $("dlg").close(); toast("Qualcuno ha appena prenotato questa fascia. Scegline un'altra."); }
+    else { console.error(err); toast("Prenotazione non riuscita. Riprova tra poco."); }
+  }
+});
+
+/* ---------- le mie prenotazioni ---------- */
+function renderMie() {
+  const ora = Date.now(), attive = mie.filter(p => p.inizio + 3600e3 > ora).sort((a, b) => a.inizio - b.inizio);
+  const vecchie = mie.filter(p => p.inizio + 3600e3 <= ora && p.inizio > ora - 30 * 864e5).sort((a, b) => b.inizio - a.inizio);
+  const nAtt = attive.filter(p => p.stato === "confermata" || p.stato === "in_attesa").length;
+  $("bMie").hidden = !nAtt; $("bMie").textContent = nAtt;
+  const riga = (p, pass) => {
+    const st = STATI[p.stato] || STATI.confermata, h = new Date(p.inizio).getHours();
+    let az = "";
+    if (!pass) {
+      if (p.stato === "rifiutata" || p.stato === "annullata") az = `<button class="btn" data-del="${p.id}">Togli dall'elenco</button>`;
+      else if (disdicibile(p.inizio)) az = `<button class="btn bad" data-dis="${p.id}">Disdici</button>`;
+      else az = `<span class="hint" style="margin:0">Mancano meno di 6 ore: non è più possibile disdire.</span>`;
+    }
+    return `<div class="it${pass ? " pass" : ""}"><div><div class="t">${fmtGiorno(p.inizio)}</div><div class="d">${fascia(h)} · ${esc(p.nome)}</div></div>
+      <span class="chip ${st.cls}">${pass && p.stato === "confermata" ? "Giocata" : st.testo}</span>${az ? `<div class="az">${az}</div>` : ""}</div>`;
+  };
+  $("mie").innerHTML = (attive.length ? attive.map(p => riga(p, false)).join("") : `<div class="card vuoto">Nessuna prenotazione in programma.<br><button class="btn pri" style="margin-top:12px" data-vai="prenota">Prenota il campo</button></div>`)
+    + (vecchie.length ? `<div class="giornotit">Ultimi 30 giorni</div>` + vecchie.map(p => riga(p, true)).join("") : "");
+}
+$("mie").addEventListener("click", async e => {
+  const v = e.target.closest("[data-vai]"); if (v) return vai(v.dataset.vai);
+  const b = e.target.closest("[data-dis],[data-del]"); if (!b) return;
+  const p = mie.find(x => x.id === (b.dataset.dis || b.dataset.del)); if (!p) return;
+  if (b.dataset.dis && !b.dataset.armed) { b.dataset.armed = 1; b.textContent = "Tocca di nuovo per disdire"; setTimeout(() => { delete b.dataset.armed; b.textContent = "Disdici"; }, 3000); return; }
+  if (b.dataset.dis && !disdicibile(p.inizio)) { toast("Mancano meno di 6 ore: non è più possibile disdire."); renderMie(); return; }
+  b.disabled = true;
+  try { await api.disdici(p); toast(b.dataset.dis ? "Prenotazione disdetta: la fascia torna libera" : "Tolta dall'elenco"); }
+  catch (err) { console.error(err); b.disabled = false; toast("Operazione non riuscita. Riprova."); }
+});
+
+/* ---------- navigazione e avvio ---------- */
+function vai(t) {
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
+  document.querySelectorAll("main>section").forEach(s => s.hidden = s.dataset.p !== t);
+  scrollTo(0, 0);
+}
+$("tabs").addEventListener("click", e => { const b = e.target.closest("[data-t]"); if (b) vai(b.dataset.t); });
+
+function caricaMese() {
+  stopOcc && stopOcc();
+  const da = mese.getTime(), a = new Date(mese.getFullYear(), mese.getMonth() + 1, 1).getTime();
+  renderCal(); renderFasce();
+  stopOcc = api.osservaOccupati(da, a, l => { occ = new Map(l.map(x => [x.id, x])); renderCal(); renderFasce(); }, errore);
+}
+setInterval(() => { renderCal(); renderFasce(); renderMie(); }, 60000);   // le fasce scadono con il passare del tempo
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { renderCal(); renderFasce(); renderMie(); } });
+
+(async () => {
+  renderCal();
+  try { api = await creaBackend("prenota"); } catch (e) { return errore(e); }
+  $("demo").hidden = !api.demo;
+  api.onUtente(async u => {
+    if (!u) { try { await api.entraAnonimo(); } catch (e) { errore(e); } return; }
+    if (!stopMie) stopMie = api.osservaMie(l => { mie = l; renderMie(); renderFasce(); }, errore);
+  });
+  caricaMese(); renderMie();
+})();
+</script>
+</body></html>

@@ -1,0 +1,56 @@
+rules_version = '2';
+// Arena Secondiano Cosimi · regole di sicurezza dell'archivio prenotazioni (Firestore)
+// Incollale in Console Firebase → Firestore Database → Regole, poi «Pubblica».
+// Le email nella lista sono gli account del gestore (Authentication → Utenti).
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function gestore() {
+      return request.auth != null && request.auth.token.email in [
+        'robertotrotta48@gmail.com'
+        // per aggiungere un gestore: metti una virgola dopo l'ultima email e scrivi la nuova tra apici
+      ];
+    }
+    function cliente() { return request.auth != null; }                 // accesso anonimo dell'app di prenotazione
+    function anticipo(t) { return t > request.time + duration.value(6, 'h'); }
+    function entro90(t) { return t < request.time + duration.value(92, 'd'); }
+    // giorno della settimana dal conteggio dei giorni dal 1/1/1970 (un giovedì): 6 = sabato.
+    // Le fasce 15-23 ora italiana cadono sempre nello stesso giorno anche in UTC.
+    function sabato(t) { return (math.floor(t.toMillis() / 86400000) + 4) % 7 == 6; }
+    function prenotazione(id) { return /databases/$(db)/documents/prenotazioni/$(id); }
+    function occupato(id) { return /databases/$(db)/documents/occupati/$(id); }
+
+    // Fasce occupate: visibili a tutti, senza nomi né numeri di telefono
+    match /occupati/{slot} {
+      allow read: if true;
+      allow create: if gestore() || (cliente()
+        && request.resource.data.keys().hasOnly(['inizio', 'stato', 'pren'])
+        && request.resource.data.inizio is timestamp
+        && anticipo(request.resource.data.inizio) && entro90(request.resource.data.inizio)
+        && request.resource.data.stato == (sabato(request.resource.data.inizio) ? 'in_attesa' : 'confermata')
+        && getAfter(prenotazione(request.resource.data.pren)).data.uid == request.auth.uid);
+      allow update: if gestore();
+      allow delete: if gestore() || (cliente()
+        && anticipo(resource.data.inizio)
+        && resource.data.pren != null
+        && get(prenotazione(resource.data.pren)).data.uid == request.auth.uid);
+    }
+
+    // Prenotazioni con i dati di chi prenota: le legge solo chi le ha fatte e il gestore
+    match /prenotazioni/{id} {
+      allow read: if gestore() || (cliente() && resource.data.uid == request.auth.uid);
+      allow create: if gestore() || (cliente()
+        && request.resource.data.keys().hasOnly(['uid', 'nome', 'cell', 'inizio', 'stato', 'slot', 'creata'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.nome is string && request.resource.data.nome.size() >= 2 && request.resource.data.nome.size() <= 50
+        && request.resource.data.cell is string && request.resource.data.cell.size() >= 6 && request.resource.data.cell.size() <= 18
+        && request.resource.data.creata == request.time
+        && anticipo(request.resource.data.inizio)
+        && getAfter(occupato(request.resource.data.slot)).data.pren == id);
+      allow update: if gestore();
+      allow delete: if gestore() || (cliente()
+        && resource.data.uid == request.auth.uid
+        && (anticipo(resource.data.inizio) || resource.data.stato in ['rifiutata', 'annullata']));
+    }
+  }
+}

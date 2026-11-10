@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="it"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="ASP Gestore">
+<meta name="theme-color" content="#155c33">
+<link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icon-180.png"><link rel="icon" href="icon-192.png">
+<title>Calcetto ASP · Gestore</title>
+<link rel="stylesheet" href="../stile.css">
+<style>header.top{background:var(--acc-2)} .riep{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:12px}
+.riep div{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;text-align:center}.riep b{display:block;font:700 22px var(--mono)}.riep small{color:var(--mut);font-size:12px}
+#fasce .fx{grid-template-columns:auto minmax(0,1fr)} #fasce .fx>span:last-child{grid-column:1/-1} #fasce .fx>span:last-child:empty{display:none} #fasce .fx>span:last-child .btn{flex:1}
+.nuova{animation:lampo 2.4s ease-out 1}@keyframes lampo{0%{background:var(--warn-soft)}100%{background:var(--panel)}}</style>
+</head><body>
+<header class="top"><div class="wrap">
+  <h1>Arena Secondiano Cosimi · Gestore</h1>
+  <div class="sub" id="chi">Prenotazioni del campo di calcio a 5</div>
+  <nav class="tabs" id="tabs" hidden><button data-t="attesa">Da confermare <span class="badge" id="bAtt" hidden></span></button><button data-t="prossime" class="on">Prossime</button><button data-t="cal">Calendario</button></nav>
+</div></header>
+<div class="demo" id="demo" hidden>Modalità prova: i dati restano su questo dispositivo finché l'app non è collegata all'archivio online.</div>
+
+<main>
+  <div class="err" id="err" hidden></div>
+
+  <section id="login" hidden>
+    <div class="card">
+      <h2>Accesso gestore</h2>
+      <form id="fLogin">
+        <label class="f"><span>Email</span><input id="lEmail" type="email" autocomplete="username" required></label>
+        <label class="f"><span>Password</span><input id="lPw" type="password" autocomplete="current-password" required></label>
+        <button class="btn pri" style="width:100%" id="lOk">Entra</button>
+        <p class="hint" id="lHint">Usa le credenziali del gestore create nella console Firebase.</p>
+      </form>
+    </div>
+  </section>
+
+  <section data-p="attesa" hidden><div id="attesa"></div></section>
+  <section data-p="prossime"><div class="riep" id="riep"></div><div id="prossime"></div></section>
+  <section data-p="cal" hidden>
+    <div class="card">
+      <div class="mesebar"><button class="btn" id="mPrev" aria-label="Mese precedente">‹</button><b id="mTit"></b><button class="btn" id="mNext" aria-label="Mese successivo">›</button></div>
+      <div class="cal" id="cal"></div>
+      <div class="legenda"><span><i style="background:var(--ok)"></i>nessuna prenotazione</span><span><i style="background:var(--warn)"></i>alcune</span><span><i style="background:var(--bad)"></i>tutto pieno</span><span style="color:var(--warn);font-weight:700">2 = da confermare</span></div>
+    </div>
+    <div class="card" id="dayCard" hidden><h2 id="dTit"></h2><div class="fasce" id="fasce"></div></div>
+  </section>
+  <p class="hint" style="text-align:center"><button class="btn" id="bEsci" hidden>Esci</button></p>
+</main>
+
+<dialog id="dlg"><form id="frm" method="dialog">
+  <h3 id="dlgT"></h3>
+  <p class="hint" style="margin:0 0 14px" id="dlgQ"></p>
+  <div id="dlgPren"><label class="f"><span>Nome e cognome</span><input id="fNome" maxlength="50"></label>
+  <label class="f"><span>Cellulare</span><input id="fCell" type="tel" inputmode="tel" maxlength="18"></label></div>
+  <div id="dlgBlocco"><label class="f"><span>Motivo (facoltativo)</span><input id="fNota" maxlength="60" placeholder="es. partita di campionato, manutenzione"></label></div>
+  <div class="riga"><button class="btn" type="button" id="dlgNo">Annulla</button><button class="btn pri" id="dlgOk"></button></div>
+</form></dialog>
+<div class="toast" id="toast" hidden></div>
+
+<script type="module">
+import { REGOLE, creaBackend, slotId, inizioSlot, fascia, riservata, GIORNI, fmtGiorno, fmtMese, STATI, esc, pulisciCell, chiaveGiorno } from "../comune.js";
+const $ = id => document.getElementById(id);
+const toast = m => { const t = $("toast"); t.textContent = m; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 3600); };
+const errore = e => { console.error(e); const el = $("err"); el.textContent = (e && e.code === "permission-denied") ? "Questo account non è abilitato come gestore." : "Collegamento all'archivio non riuscito. Controlla la connessione e riapri l'app."; el.hidden = false; };
+const oggi0 = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
+const ORIZZ = 400;   // giorni di prenotazioni seguiti in tempo reale
+
+let api, pren = [], occ = new Map(), visti = null, nuove = new Set(), tab = "prossime", mese = (() => { const d = oggi0(); d.setDate(1); return d; })(), sel = null, stop = [], dlgCtx = null;
+const attive = () => pren.filter(p => p.stato === "confermata" || p.stato === "in_attesa");
+
+/* ---------- elenco prenotazioni ---------- */
+function scheda(p) {
+  const st = STATI[p.stato] || STATI.confermata, h = new Date(p.inizio).getHours(), tel = pulisciCell(p.cell);
+  let az = "";
+  if (p.stato === "in_attesa") az = `<button class="btn okb" data-a="conferma" data-id="${p.id}">Conferma</button><button class="btn bad" data-a="rifiuta" data-id="${p.id}">Rifiuta</button>`;
+  else if (p.stato === "confermata") az = `<button class="btn bad" data-a="annulla" data-id="${p.id}">Annulla prenotazione</button>`;
+  return `<div class="it${nuove.has(p.id) ? " nuova" : ""}"><div><div class="t">${fascia(h)}</div>
+    <div class="d"><b style="color:var(--fg)">${esc(p.nome)}</b> · <a class="tel" href="tel:${esc(tel)}">${esc(p.cell)}</a>${p.uid === "gestore" || p.daGestore ? " · inserita da te" : ""}</div></div>
+    <span class="chip ${st.cls}">${st.testo}</span>${az ? `<div class="az">${az}</div>` : ""}</div>`;
+}
+function perGiorno(l) {
+  let h = "", g = "";
+  for (const p of l) { const k = chiaveGiorno(new Date(p.inizio)); if (k !== g) { g = k; h += `<div class="giornotit">${fmtGiorno(p.inizio)}</div>`; } h += scheda(p); }
+  return h;
+}
+function render() {
+  const ora = Date.now(), fut = attive().filter(p => p.inizio + 3600e3 > ora).sort((a, b) => a.inizio - b.inizio);
+  const att = fut.filter(p => p.stato === "in_attesa"), o = oggi0(), dom = new Date(o.getTime() + 864e5), dopo = new Date(o.getTime() + 2 * 864e5);
+  $("bAtt").hidden = !att.length; $("bAtt").textContent = att.length;
+  const nOggi = fut.filter(p => p.inizio < dom.getTime()).length, nDom = fut.filter(p => p.inizio >= dom.getTime() && p.inizio < dopo.getTime()).length;
+  $("riep").innerHTML = `<div><b>${nOggi}</b><small>oggi</small></div><div><b>${nDom}</b><small>domani</small></div><div><b style="color:${att.length ? "var(--warn)" : "inherit"}">${att.length}</b><small>da confermare</small></div>`;
+  $("prossime").innerHTML = fut.length ? perGiorno(fut) : `<div class="card vuoto">Nessuna prenotazione in programma.</div>`;
+  $("attesa").innerHTML = att.length ? `<p class="hint" style="margin:0 0 6px">Richieste del sabato: conferma se il campo è libero, rifiuta se c'è una partita di campionato. Chi ha prenotato vede subito l'esito.</p>` + perGiorno(att)
+    : `<div class="card vuoto">Nessuna richiesta da confermare.</div>`;
+  renderCal(); renderFasce();
+}
+document.querySelector("main").addEventListener("click", async e => {
+  const b = e.target.closest("[data-a]"); if (!b) return;
+  const p = pren.find(x => x.id === b.dataset.id); if (!p) return;
+  const a = b.dataset.a, testi = { conferma: "Conferma", rifiuta: "Rifiuta", annulla: "Annulla prenotazione" };
+  if (a !== "conferma" && !b.dataset.armed) { b.dataset.armed = 1; b.textContent = "Tocca di nuovo"; setTimeout(() => { delete b.dataset.armed; b.textContent = testi[a]; }, 3000); return; }
+  b.disabled = true;
+  try {
+    await api.cambiaStato(p, { conferma: "confermata", rifiuta: "rifiutata", annulla: "annullata" }[a]);
+    toast({ conferma: "Prenotazione confermata", rifiuta: "Richiesta rifiutata: la fascia è di nuovo libera", annulla: "Prenotazione annullata: la fascia è di nuovo libera" }[a]);
+  } catch (err) { console.error(err); b.disabled = false; toast("Operazione non riuscita. Riprova."); }
+});
+
+/* ---------- calendario ---------- */
+function renderCal() {
+  $("mTit").textContent = fmtMese(mese);
+  const off = (mese.getDay() + 6) % 7, n = new Date(mese.getFullYear(), mese.getMonth() + 1, 0).getDate(), o = oggi0();
+  $("mPrev").disabled = mese <= new Date(o.getFullYear(), o.getMonth(), 1);
+  let h = GIORNI.map(g => `<div class="gs">${g}</div>`).join("") + "<div></div>".repeat(off);
+  for (let g = 1; g <= n; g++) {
+    const d = new Date(mese.getFullYear(), mese.getMonth(), g), ore = REGOLE.ore.filter(x => !riservata(d, x));
+    const occupate = ore.filter(x => occ.has(slotId(d, x))).length, inAtt = ore.filter(x => occ.get(slotId(d, x))?.stato === "in_attesa").length;
+    const passato = d < o, cls = ["gg", passato ? "off" : occupate === ore.length ? "pieno" : occupate ? "pochi" : "", +d === +o ? "oggi" : "", sel && +d === +sel ? "sel" : ""].join(" ");
+    h += `<button class="${cls}" data-g="${g}" ${passato ? "disabled" : ""}>${inAtt ? `<span class="n">${inAtt}</span>` : ""}${g}${passato ? "" : `<i></i><small>${occupate}/${ore.length}</small>`}</button>`;
+  }
+  $("cal").innerHTML = h;
+}
+$("cal").addEventListener("click", e => { const b = e.target.closest("[data-g]"); if (!b || b.disabled) return; sel = new Date(mese.getFullYear(), mese.getMonth(), +b.dataset.g); renderCal(); renderFasce(); $("dayCard").scrollIntoView({ behavior: "smooth", block: "start" }); });
+$("mPrev").addEventListener("click", () => { mese = new Date(mese.getFullYear(), mese.getMonth() - 1, 1); sel = null; renderCal(); renderFasce(); });
+$("mNext").addEventListener("click", () => { mese = new Date(mese.getFullYear(), mese.getMonth() + 1, 1); sel = null; renderCal(); renderFasce(); });
+function renderFasce() {
+  $("dayCard").hidden = !sel; if (!sel) return;
+  $("dTit").textContent = fmtGiorno(sel.getTime());
+  const ora = Date.now();
+  $("fasce").innerHTML = REGOLE.ore.map(h => {
+    const id = slotId(sel, h), o = occ.get(id), p = o && o.pren ? pren.find(x => x.id === o.pren) : null, passata = inizioSlot(sel, h) + 3600e3 <= ora;
+    let cls = "nonp", s = "", az = "";
+    if (riservata(sel, h)) s = "Fascia riservata (non prenotabile)";
+    else if (o && o.stato === "bloccato") { s = `<b>Bloccata</b>${o.nota ? " · " + esc(o.nota) : ""}`; if (!passata) az = `<button class="btn" data-s="${h}">Sblocca</button>`; }
+    else if (o) { cls = o.stato === "in_attesa" ? "" : "mia"; s = p ? `<b>${esc(p.nome)}</b> · <a class="tel" href="tel:${esc(pulisciCell(p.cell))}">${esc(p.cell)}</a><br>${STATI[p.stato]?.testo || ""}` : "Occupata";
+      if (p && !passata) az = p.stato === "in_attesa" ? `<button class="btn okb" data-a="conferma" data-id="${p.id}">Conferma</button>` : ""; }
+    else if (passata) s = "Libera (passata)";
+    else { cls = "libera"; s = "<b>Libera</b>"; az = `<button class="btn" data-b="${h}">Blocca</button><button class="btn pri" data-p="${h}">Prenota</button>`; }
+    return `<div class="fx ${cls}"><span class="h">${fascia(h)}</span><span class="s">${s}</span><span style="display:flex;gap:6px">${az}</span></div>`;
+  }).join("");
+}
+$("fasce").addEventListener("click", async e => {
+  const b = e.target.closest("[data-b],[data-p],[data-s]"); if (!b) return;
+  if (b.dataset.s) { const h = +b.dataset.s; b.disabled = true; try { await api.sblocca(slotId(sel, h)); toast("Fascia sbloccata"); } catch (err) { console.error(err); b.disabled = false; toast("Operazione non riuscita."); } return; }
+  const h = +(b.dataset.b || b.dataset.p), blocco = !!b.dataset.b;
+  dlgCtx = { d: new Date(sel), h, blocco };
+  $("dlgT").textContent = blocco ? "Blocca la fascia" : "Prenota per un cliente";
+  $("dlgQ").textContent = `${fmtGiorno(sel.getTime())}, ${fascia(h)}`;
+  $("dlgPren").hidden = blocco; $("dlgBlocco").hidden = !blocco;
+  $("fNome").value = ""; $("fCell").value = ""; $("fNota").value = "";
+  $("dlgOk").textContent = blocco ? "Blocca" : "Prenota"; $("dlgOk").disabled = false;
+  $("dlg").showModal();
+});
+$("dlgNo").addEventListener("click", () => $("dlg").close());
+$("frm").addEventListener("submit", async e => {
+  e.preventDefault(); if (!dlgCtx) return;
+  const { d, h, blocco } = dlgCtx, slot = slotId(d, h), inizio = inizioSlot(d, h);
+  $("dlgOk").disabled = true;
+  try {
+    if (blocco) { await api.blocca(slot, inizio, $("fNota").value.trim()); toast("Fascia bloccata: nessuno potrà prenotarla"); }
+    else {
+      const nome = $("fNome").value.trim(), cell = $("fCell").value.trim();
+      if (nome.length < 2) { $("dlgOk").disabled = false; $("fNome").focus(); return; }
+      await api.prenota({ slot, inizio, nome, cell, stato: "confermata" }); toast("Prenotazione inserita");
+    }
+    $("dlg").close();
+  } catch (err) { $("dlgOk").disabled = false; console.error(err); toast(String(err && err.message).includes("occupata") ? "La fascia è appena stata occupata." : "Operazione non riuscita."); }
+});
+
+/* ---------- accesso e avvio ---------- */
+function vai(t) {
+  tab = t;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
+  document.querySelectorAll("main>section[data-p]").forEach(s => s.hidden = s.dataset.p !== t);
+  scrollTo(0, 0);
+}
+$("tabs").addEventListener("click", e => { const b = e.target.closest("[data-t]"); if (b) vai(b.dataset.t); });
+$("fLogin").addEventListener("submit", async e => {
+  e.preventDefault(); $("lOk").disabled = true;
+  try { await api.login($("lEmail").value.trim(), $("lPw").value); }
+  catch (err) { console.error(err); $("lHint").textContent = "Email o password non corrette."; $("lHint").style.color = "var(--bad)"; }
+  $("lOk").disabled = false;
+});
+$("bEsci").addEventListener("click", () => api.logout());
+
+function avvisa(l) {
+  const ids = new Set(l.map(p => p.id));
+  if (visti) {
+    const arrivate = l.filter(p => !visti.has(p.id) && (p.stato === "confermata" || p.stato === "in_attesa") && p.uid !== "gestore" && !p.daGestore);
+    arrivate.forEach(p => nuove.add(p.id));
+    if (arrivate.length) {
+      const p = arrivate[0];
+      toast(`${p.stato === "in_attesa" ? "Nuova richiesta da confermare" : "Nuova prenotazione"}: ${fmtGiorno(p.inizio, false)} ${fascia(new Date(p.inizio).getHours())} · ${p.nome}`);
+      try { navigator.vibrate && navigator.vibrate([120, 60, 120]); } catch {}
+      setTimeout(() => arrivate.forEach(x => nuove.delete(x.id)), 2600);
+    }
+  }
+  visti = ids;
+}
+function entra(u) {
+  stop.forEach(f => f && f()); stop = []; pren = []; occ = new Map(); visti = null;
+  const dentro = !!(u && !u.isAnonymous);
+  $("login").hidden = dentro; $("tabs").hidden = !dentro; $("bEsci").hidden = !dentro;
+  document.querySelectorAll("main>section[data-p]").forEach(s => s.hidden = !dentro || s.dataset.p !== tab);
+  $("chi").textContent = dentro ? `Accesso: ${u.email || "gestore"}` : "Prenotazioni del campo di calcio a 5";
+  if (!dentro) return;
+  const da = oggi0().getTime() - 864e5, a = da + ORIZZ * 864e5;
+  stop.push(api.osservaPrenotazioni(da, a, l => { avvisa(l); pren = l; render(); }, errore));
+  stop.push(api.osservaOccupati(da, a, l => { occ = new Map(l.map(x => [x.id, x])); render(); }, errore));
+}
+setInterval(() => { if (pren.length || occ.size) render(); }, 60000);
+
+(async () => {
+  try { api = await creaBackend("gestore"); } catch (e) { return errore(e); }
+  $("demo").hidden = !api.demo;
+  if (api.demo) $("lHint").textContent = "Modalità prova: inserisci qualsiasi email e password.";
+  api.onUtente(entra);
+})();
+</script>
+</body></html>
